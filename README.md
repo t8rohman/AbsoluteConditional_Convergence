@@ -1,4 +1,4 @@
-# AbsoluteConditional_Convergence
+# Absolute Conditional Convergence
 
 In this project, I tried to test and compare Absolute and Conditional Convergence economy between past and current period. It is the one of 5 questions that sensei gave to me for the Macroeconomics final exam. As the data set is not large, I conducted the analysis in R environment. There are 3 keys activities in this project:
 
