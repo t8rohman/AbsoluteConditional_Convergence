@@ -1,0 +1,420 @@
+---
+title: "Absolute and Conditional Convergence"
+author: "Taufiqur Rohman"
+date: '2022-05-25'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+This is one of the problem that Professor gave me for the final exam of Macroeconomics. He asked me to test the absolute and conditional convergence within several periods. In this project, I will show you the process from loading and extracting the data, cleaning and transforming the data, merging 3 excel files using SQL environment, and conducting regression to test the convergence theory.
+
+```{r activate library, include=FALSE}
+library(ggplot2)
+library(readxl)
+library(broom)
+library(ggpubr)
+library(lmtest)
+library(aod)
+library(car)
+library(sqldf)
+library(fastDummies)
+library(recipes)
+```
+
+## Extract, Transform, and Load (ETL) Data
+
+There are several data in the problem, separated into 3 csv or excel files. The "data-wdi.csv" contains all data from World Development Indicators, "barrolee-region.xlsx" contains the geographical data, and "halljones-gadp.xls" contains the GADP. All of this data are needed to answer the problems.  Let me load the data first and save it into data frame.
+
+```{r upload data set}
+df_base <- read.csv("~/Documents/RU/Macroeconomics II/Mid-term Exam/data/data-wdi.csv")
+df_region <- read_excel("~/Documents/RU/Macroeconomics II/Mid-term Exam/data/barrolee-region.xlsx")
+df_gadp <- read_excel("~/Documents/RU/Macroeconomics II/Mid-term Exam/data/halljones-gadp.xls")
+
+head(df_base)
+head(df_region)
+head(df_gadp)
+```
+
+After checking the df_base, the column name still include "." in it. Also, the column names for years are not clear. I should rename all the column name first with proper format.
+
+```{r formatting column names}
+year_colnames <- seq(1970, 2015, 1)
+colnames(df_base) <- c('series', 'series_code', 'country', 'country_code', year_colnames)
+
+head(df_base)
+```
+
+Looking to the df_gadp, the data that I need, the GADP, is in string data type. I need it in dbl data type to make it calculate-able for regression.
+
+```{r converting string to number}
+df_gadp$GADP <- as.double(df_gadp$GADP)
+str(df_gadp)
+```
+
+The next part is the region. I will need the region data for regression. The region data is included in df_region. All of these 3 data frames contain the country code. I can make this country code as a key for doing the inner join. For this, I use the sqldf package to write SQL in R environment.
+
+```{r inner join for extracting region data}
+df_base_region <- sqldf("
+SELECT 
+    df_region.region_code AS region,
+    df_base.*,
+    df_gadp.GADP
+FROM 
+    df_base
+INNER JOIN df_region
+    ON df_base.country_code = df_region.WBcode
+INNER JOIN df_gadp
+    ON df_base.country_code = df_gadp.Code
+")
+
+head(df_base_region)
+```
+
+There's a problem in the data. The data contains too many duplicate data. Let's just trim and remove the duplicate data.
+
+```{r removing duplicate data}
+df_base_region <- df_base_region %>% 
+  distinct()
+```
+
+For the final, I create the dummy variables for region to conduct the regression.
+
+```{r creating dummy for region}
+df_base_region_dummy <- dummy_cols(df_base_region, select_columns = 'region')
+
+head(df_base_region_dummy)
+```
+
+The dataframe still contains four series of variables. GDP per capita, Consumer Price Index (CPI), Secondary School enrollment, and Trade Openess. I will separate the data frame based on the series to make it neater. First, I will check the unique value for the series_code.
+
+```{r check unique value for series}
+unique(df_base_region_dummy['series'])
+unique(df_base_region_dummy['series_code'])
+```
+
+Then, I pass the series_code to the SQL code and put the series_code to the WHERE clause. In total, there are 4 data frames. Also, I create another separated data frame for GADP. 
+
+```{r dividing data frame based on series}
+df_gdp <- sqldf("
+SELECT 
+    *
+FROM 
+    df_base_region_dummy
+WHERE
+    series_code = 'NY.GDP.PCAP.KD'
+")
+
+df_cpi <- sqldf("
+SELECT 
+    *
+FROM 
+    df_base_region_dummy
+WHERE
+    series_code = 'FP.CPI.TOTL'
+")
+
+df_school <- sqldf("
+SELECT 
+    *
+FROM 
+    df_base_region_dummy
+WHERE
+    series_code = 'SE.SEC.ENRR'
+")
+
+df_trade <- sqldf("
+SELECT 
+    *
+FROM 
+    df_base_region_dummy
+WHERE
+    series_code = 'NE.TRD.GNFS.ZS'
+")
+
+df_gdp <- subset(df_gdp, select = -c(series, series_code))
+df_cpi <- subset(df_cpi, select = -c(series, series_code))
+df_school <- subset(df_school, select = -c(series, series_code))
+df_trade <- subset(df_trade, select = -c(series, series_code))
+df_gadp <- distinct(df_base_region[c('country', 'country_code', 'GADP')])
+```
+
+ETL is done, let's move to the question.
+
+## Problem 1: Absolute Convergence
+
+Test the absolute convergence theory for 
+  1. 1970-2015 period, 
+  2. 1970-1990 period,  
+  3. 1990-2015 period,
+  4. 1995-2015 period, and
+  5. 2000-2015 period
+Present discussions of your results.
+
+To calculate it, first we derive and calculate the following variables:
+
+- Per capita real GDP growth rate,is natural log of ((GDP per capita (constant 2010 US dollars) in last year – GDP per capita in initial year) / number of years)
+- Initial real per capita GDP in natural log expression 
+
+```{r calculating GDP growth rate, include=FALSE}
+var_prob1 <- c("country", "country_code", "1970", "1990", "1995", "2000", "2015")
+df_prob1 <- df_gdp[var_prob1]
+
+df_prob1["gr_1_prd"] <- log((df_prob1["2015"] - df_prob1["1970"]) / (2015-1970))
+df_prob1["gr_2_prd"] <- log((df_prob1["1990"] - df_prob1["1970"]) / (1990-1970))
+df_prob1["gr_3_prd"] <- log((df_prob1["2015"] - df_prob1["1990"]) / (2015-1990))
+df_prob1["gr_4_prd"] <- log((df_prob1["2015"] - df_prob1["1995"]) / (2015-1995))
+df_prob1["gr_5_prd"] <- log((df_prob1["2015"] - df_prob1["2000"]) / (2015-2000))
+```
+
+```{r calculating log natural for initial gdp}
+itn_year <- c("1970", "1990", "1995", "2000")
+itn_year_log <- c("ln1970", "ln1990", "ln1995", "ln2000")
+
+df_prob1[itn_year_log] <- df_prob1[itn_year] %>% 
+  log()
+```
+
+Then, using these two variables, I can examine the ‘absolute convergence’ hypothesis by running cross-country OLS regressions and report the result. 
+
+```{r regressing all the period}
+prd_1_mdl <- lm(gr_1_prd ~ ln1970, data = df_prob1) 
+prd_2_mdl <- lm(gr_2_prd ~ ln1970, data = df_prob1) 
+prd_3_mdl <- lm(gr_3_prd ~ ln1990, data = df_prob1) 
+prd_4_mdl <- lm(gr_4_prd ~ ln1995, data = df_prob1) 
+prd_5_mdl <- lm(gr_5_prd ~ ln2000, data = df_prob1) 
+
+prd_1_mdl
+prd_2_mdl
+prd_3_mdl
+prd_4_mdl
+prd_5_mdl
+```
+
+Let's plot the data and regression line to see the pattern.
+
+```{r plotting}
+plot_1_mdl <- plot(df_prob1$ln1970, df_prob1$gr_1_prd, main = "Absolute Convergence 1970 - 2015",
+     xlab = "Log GDP 1970", ylab = "Log Growth GDP",
+     pch = 19, frame = FALSE)
+abline(prd_1_mdl, data = df_prob1, col = "blue")
+
+plot_2_mdl <- plot(df_prob1$ln1970, df_prob1$gr_2_prd, main = "Absolute Convergence 1970 - 1990",
+     xlab = "Log GDP 1970", ylab = "Log Growth GDP",
+     pch = 19, frame = FALSE)
+abline(prd_2_mdl, data = df_prob1, col = "blue")
+
+plot_3_mdl <- plot(df_prob1$ln1990, df_prob1$gr_1_prd, main = "Absolute Convergence 1990 - 2015",
+     xlab = "Log GDP 1990", ylab = "Log Growth GDP",
+     pch = 19, frame = FALSE)
+abline(prd_3_mdl, data = df_prob1, col = "blue")
+
+plot_4_mdl <- plot(df_prob1$ln1995, df_prob1$gr_1_prd, main = "Absolute Convergence 1995 - 2015",
+     xlab = "Log GDP 1995", ylab = "Log Growth GDP",
+     pch = 19, frame = FALSE)
+abline(prd_4_mdl, data = df_prob1, col = "blue")
+
+plot_5_mdl <- plot(df_prob1$ln2000, df_prob1$gr_1_prd, main = "Absolute Convergence 2000 - 2015",
+     xlab = "Log GDP 2000", ylab = "Log Growth GDP",
+     pch = 19, frame = FALSE)
+abline(prd_5_mdl, data = df_prob1, col = "blue")
+```
+
+Looking from the scatter plot with regression line above, the initial GDP has a positive correlation to the GDP growth for all period, either short term or long term. It shows that we countries around the world have not yet reached the convergence of economy, as it’s supposed to be negatively correlated if the theory holds.
+
+## Problem 2: Conditional Convergence
+
+Test the conditional convergence theory using those control variables (in the growth regressions guide) for the same periods. Present discussions of your results. Report the whole period result.
+
+Now derive these control variables and countries.
+
+  1. Initial education variable
+  2. Institution such as GADP (Government Anti-Diversion Policy) 
+  3. 3 Regional dummies: East Asia and Pacific, Latin America and Caribbean, and Sub-Saharan Africa from World Bank
+  4. Consumer Price Index growth rate
+  5. Average of trade openness: (export + import) / GDP from WDI
+
+These variables can be added one by one or together
+
+Using these common control variables, set up the cross-country growth regression, showing ‘conditional convergence’. Run the regression using simple OLS, and report the result. Explain the result and theoretical reason for that.
+
+### a) Adding initial education
+
+We can use either natural log of secondary school enrollment ratio (from WDI) or average schooling year (from Barro-Lee dataset) for all population in 1980 or 1981 (initial GDP and initial education variables are basic controls). In this problem I will use the natural log of secondary school enrollment ratio (from WDI). As the data in the data set still in the ratio, I should calculate the log natural for the initial education first.
+
+```{r subsetting the column to calculate initial education}
+var_prob2 <- c("country", "country_code", "1971", "1990", "1995", "2000", "2015")
+df_prob2_a <- df_school[var_prob2]
+```
+
+```{r calculating log natural for initial education}
+itn_year_2 <- c("1971", "1990", "1995", "2000")
+itn_year_log_2 <- c("ln1971", "ln1990", "ln1995", "ln2000")
+
+df_prob2_a[itn_year_log_2] <- df_prob2_a[itn_year_2] %>% 
+  log()
+```
+
+Notes in here, for initial education in 1970, the Professor wants me to change it into year 1971 as the there are so many null data in initial education in 1970.
+
+```{r building the 1st model}
+cc_a_prd_1_mdl <- lm(df_prob1$gr_1_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971) 
+cc_a_prd_2_mdl <- lm(df_prob1$gr_2_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971) 
+cc_a_prd_3_mdl <- lm(df_prob1$gr_3_prd ~ df_prob1$ln1990 + df_prob2_a$ln1990) 
+cc_a_prd_4_mdl <- lm(df_prob1$gr_4_prd ~ df_prob1$ln1995 + df_prob2_a$ln1995) 
+cc_a_prd_5_mdl <- lm(df_prob1$gr_5_prd ~ df_prob1$ln2000 + df_prob2_a$ln2000) 
+
+summary(cc_a_prd_1_mdl)
+summary(cc_a_prd_2_mdl)
+summary(cc_a_prd_3_mdl)
+summary(cc_a_prd_4_mdl)
+summary(cc_a_prd_5_mdl)
+```
+
+Take a look at the table of conditional convergence now. Throughout history, the importance of early education cannot be overstated, as it is significantly affect the GDP growth rate. The positive sign indicates that countries with stronger initial education have had greater GDP development. It demonstrates the importance of education for economic development. 
+
+### b) Adding GADP
+
+```{r building the 2nd model}
+cc_b_prd_1_mdl <- lm(df_prob1$gr_1_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP)
+cc_b_prd_2_mdl <- lm(df_prob1$gr_2_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP) 
+cc_b_prd_3_mdl <- lm(df_prob1$gr_3_prd ~ df_prob1$ln1990 + df_prob2_a$ln1990 + df_gadp$GADP) 
+cc_b_prd_4_mdl <- lm(df_prob1$gr_4_prd ~ df_prob1$ln1995 + df_prob2_a$ln1995 + df_gadp$GADP) 
+cc_b_prd_5_mdl <- lm(df_prob1$gr_5_prd ~ df_prob1$ln2000 + df_prob2_a$ln2000 + df_gadp$GADP) 
+
+summary(cc_b_prd_1_mdl)
+summary(cc_b_prd_2_mdl)
+summary(cc_b_prd_3_mdl)
+summary(cc_b_prd_4_mdl)
+summary(cc_b_prd_5_mdl)
+```
+
+GADP is a variable that sums up how people feel about structural policies and institutional contexts. After including the institutional variable, the variable is only significant for the 1970 – 1990 period. The variable is also significance in 1970 – 2015, but it is weaker (at 85-percent confidence interval). The institution variable appears to be only important in the past period.
+
+### c) Adding 3 regional dummies
+
+```{r separating the region dummy into new data frame}
+df_region <- distinct(df_base_region_dummy[c('country', 'country_code', 'region', 'region_East Asia and the Pacific', 'region_Latin America and the Caribbean', 'region_Sub-Saharan Africa')])
+```
+
+```{r rename the column}
+names(df_region)[4] <- "east_asia"
+names(df_region)[5] <- "latin_america"
+names(df_region)[6] <- "sub_saharan"
+```
+
+```{r building the 3rd model}
+cc_c_prd_1_mdl <- lm(df_prob1$gr_1_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan)
+cc_c_prd_2_mdl <- lm(df_prob1$gr_2_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan) 
+cc_c_prd_3_mdl <- lm(df_prob1$gr_3_prd ~ df_prob1$ln1990 + df_prob2_a$ln1990 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan) 
+cc_c_prd_4_mdl <- lm(df_prob1$gr_4_prd ~ df_prob1$ln1995 + df_prob2_a$ln1995 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan) 
+cc_c_prd_5_mdl <- lm(df_prob1$gr_5_prd ~ df_prob1$ln2000 + df_prob2_a$ln2000 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan) 
+
+summary(cc_c_prd_1_mdl)
+summary(cc_c_prd_2_mdl)
+summary(cc_c_prd_3_mdl)
+summary(cc_c_prd_4_mdl)
+summary(cc_c_prd_5_mdl)
+```
+
+The next analysis is by adding 3 regional dummy variables; East Asia and Pacific, Latin America and Carribean, Sub-Saharan Africa. Looking at the regression result, they all have negative sign to the dependent variable. Even though the significance can only be found in 1970 – 2015 and 1990 – 2015. It shows that African countries have a lower GDP growth than non-African countries. 
+
+### d) Adding CPI growth rate
+
+Consumer Price Index growth rate, from WDI, similarly calculated by the method in the problem 1, absolute convergence.
+
+```{r calculating CPI growth rate, include=FALSE}
+var_prob2 <- c("country", "country_code", "1970", "1990", "1995", "2000", "2015")
+df_prob2_d <- df_cpi[var_prob2]
+
+df_prob2_d["cpi_1_prd"] <- log((df_prob2_d["2015"] - df_prob2_d["1970"]) / (2015-1970))
+df_prob2_d["cpi_2_prd"] <- log((df_prob2_d["1990"] - df_prob2_d["1970"]) / (1990-1970))
+df_prob2_d["cpi_3_prd"] <- log((df_prob2_d["2015"] - df_prob2_d["1990"]) / (2015-1990))
+df_prob2_d["cpi_4_prd"] <- log((df_prob2_d["2015"] - df_prob2_d["1995"]) / (2015-1995))
+df_prob2_d["cpi_5_prd"] <- log((df_prob2_d["2015"] - df_prob2_d["2000"]) / (2015-2000))
+```
+
+```{r building the 4th model}
+cc_d_prd_1_mdl <- lm(df_prob1$gr_1_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_1_prd)
+
+cc_d_prd_2_mdl <- lm(df_prob1$gr_2_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_2_prd) 
+
+cc_d_prd_3_mdl <- lm(df_prob1$gr_3_prd ~ df_prob1$ln1990 + df_prob2_a$ln1990 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_3_prd) 
+
+cc_d_prd_4_mdl <- lm(df_prob1$gr_4_prd ~ df_prob1$ln1995 + df_prob2_a$ln1995 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_4_prd) 
+
+cc_d_prd_5_mdl <- lm(df_prob1$gr_5_prd ~ df_prob1$ln2000 + df_prob2_a$ln2000 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_5_prd) 
+
+summary(cc_d_prd_1_mdl)
+summary(cc_d_prd_2_mdl)
+summary(cc_d_prd_3_mdl)
+summary(cc_d_prd_4_mdl)
+summary(cc_d_prd_5_mdl)
+```
+
+### e) Adding average trade openness
+
+For the final variable, I will include the average trade openness. 
+
+```{r calculating average trade of every country in every period}
+period1 <- as.character(seq(1970, 2015, 1))
+period2 <- as.character(seq(1970, 1990, 1))
+period3 <- as.character(seq(1990, 2015, 1))
+period4 <- as.character(seq(1995, 2015, 1))
+period5 <- as.character(seq(2000, 2015, 1))
+
+df_trade['avg_prd_1'] <- rowMeans(df_trade[period1])
+df_trade['avg_prd_2'] <- rowMeans(df_trade[period2])
+df_trade['avg_prd_3'] <- rowMeans(df_trade[period3])
+df_trade['avg_prd_4'] <- rowMeans(df_trade[period4])
+df_trade['avg_prd_5'] <- rowMeans(df_trade[period5])
+```
+
+```{r building the 5th model}
+cc_e_prd_1_mdl <- lm(df_prob1$gr_1_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_1_prd + df_trade$avg_prd_1)
+
+cc_e_prd_2_mdl <- lm(df_prob1$gr_2_prd ~ df_prob1$ln1970 + df_prob2_a$ln1971 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       + df_prob2_d$cpi_2_prd + df_trade$avg_prd_2) 
+
+cc_e_prd_3_mdl <- lm(df_prob1$gr_3_prd ~ df_prob1$ln1990 + df_prob2_a$ln1990 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       + df_prob2_d$cpi_3_prd + df_trade$avg_prd_3) 
+
+cc_e_prd_4_mdl <- lm(df_prob1$gr_4_prd ~ df_prob1$ln1995 + df_prob2_a$ln1995 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_4_prd + df_trade$avg_prd_4) 
+
+cc_e_prd_5_mdl <- lm(df_prob1$gr_5_prd ~ df_prob1$ln2000 + df_prob2_a$ln2000 + df_gadp$GADP +
+                       df_region$east_asia + df_region$latin_america + df_region$sub_saharan +
+                       df_prob2_d$cpi_5_prd + + df_trade$avg_prd_5) 
+
+summary(cc_e_prd_1_mdl)
+summary(cc_e_prd_2_mdl)
+summary(cc_e_prd_3_mdl)
+summary(cc_e_prd_4_mdl)
+summary(cc_e_prd_5_mdl)
+```
+
+Finally, after accounting for the CPI and trade openness, it seems that neither the CPI nor the trade openness have an impact on GDP growth (column 5a, 5b, 5c, 6a, 6b, 6c). What's notable is that the Sub-Saharan Africa dummy variable continues to have a negative impact on GDP growth, with substantial effects from 1970 to 2015 and 1990 to 2015. Another interesting discovery is that the absolute convergence theory only holds true for the 1970–2015 period. The relevance of the initial GDP, even after accounting for all of the control factors, demonstrates this.
+
+## Conclusion
+
+Overall, I discovered that the absolute convergence hypothesis no longer probably applies for the current period. We should consider conditional convergence, which states that economic convergence is also dependent on country similarities. Policymakers in emerging countries should consider improving education levels in order to achieve a better future development rate.
